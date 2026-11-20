@@ -34,7 +34,7 @@
 #define CH_NORTH_REF  4                 // North again, on the timer of group 1
 
 #define WINDOW_MS     20                // Collect edges this long after the first one
-#define QUIET_MS      300               // Then ignore the echoes before arming again
+#define QUIET_MS      300               // Arm again after this long without a single edge
 #define SPEED_MM_S    343000.0          // Speed of sound at 20 C, for the mm column only
 
 typedef struct
@@ -59,6 +59,7 @@ static volatile uint32_t cap_value[N_CHANNELS];   // Timer value of the first ed
 static volatile uint32_t cap_rising[N_CHANNELS];  // Polarity of the first edge
 static volatile uint32_t cap_edges[N_CHANNELS];   // Number of edges seen, shows ringing
 static volatile uint32_t cap_mask;                // Channels that have their first edge
+static int      idle_level[N_SENSORS];            // Level of D0 in silence, read at startup
 static uint32_t resolution_hz;
 static uint32_t shot_number;
 
@@ -141,6 +142,35 @@ static void arm(void)
 }
 
 /*
+ * Wait until the echoes are gone: no edge on any channel and every output
+ * back at its idle level for QUIET_MS in a row. Arming earlier starts a
+ * measurement in the middle of a sound, which gives meaningless times.
+ */
+static void wait_for_silence(void)
+{
+  uint32_t quiet_since = millis();
+  uint32_t last_edges  = 0;
+
+  while ( (millis() - quiet_since) < QUIET_MS )
+  {
+    uint32_t edges = 0;
+    bool     idle  = true;
+
+    for (int ch = 0; ch != N_SENSORS; ch++)
+    {
+      edges = edges + cap_edges[ch];
+      idle  = idle && (gpio_get_level(channel[ch].pin) == idle_level[ch]);
+    }
+    if ( (edges != last_edges) || !idle )
+    {
+      last_edges  = edges;
+      quiet_since = millis();
+    }
+    delay(1);
+  }
+}
+
+/*
  * Arrival time of a sensor relative to North, in timer ticks. West is
  * compared to the North channel that shares its timer.
  */
@@ -212,8 +242,9 @@ void setup(void)
   Serial.printf("Idle levels:");
   for (int ch = 0; ch != N_SENSORS; ch++)
   {
+    idle_level[ch] = gpio_get_level(channel[ch].pin);
     Serial.printf("  %s (GPIO %d) %s", channel[ch].name, (int)channel[ch].pin,
-                  gpio_get_level(channel[ch].pin) ? "high" : "low");
+                  idle_level[ch] ? "high" : "low");
   }
   Serial.printf("\r\nWaiting for a bang, times are relative to North\r\n");
   arm();
@@ -225,7 +256,7 @@ void loop(void)
   {
     delay(WINDOW_MS);
     report();
-    delay(QUIET_MS);
+    wait_for_silence();
     arm();
   }
 }
